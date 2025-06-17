@@ -1,232 +1,209 @@
-console.log('Script is running')
-// scripts/download.js
+console.log('🚀 Script is running')
+
 import https from 'https'
-import fs, { copyFile, mkdirSync } from 'fs'
+import fs from 'fs'
+import { copyFileSync, mkdirSync, existsSync, chmodSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import unzipper from 'unzipper'
 import tar from 'tar'
 import { copySync } from 'cpx'
 
+// Funções Utilitárias
+/** Baixa um arquivo */
 function download(url, dest) {
   return new Promise((resolve, reject) => {
-    console.log(`Downloading ${url} to ${dest}`)
+    console.log(`⬇️  Downloading ${url} → ${dest}`)
     const file = fs.createWriteStream(dest)
-    https
-      .get(url, (response) => {
-        console.log(`Response status code: ${response.statusCode}`)
-        if (
-          response.statusCode >= 300 &&
-          response.statusCode < 400 &&
-          response.headers.location
-        ) {
-          // Handle redirect
-          const redirectURL = response.headers.location
-          console.log(`Redirecting to ${redirectURL}`)
-          download(redirectURL, dest).then(resolve, reject) // Recursive call
-          return
-        } else if (response.statusCode !== 200) {
-          reject(`Failed to get '${url}' (${response.statusCode})`)
-          return
-        }
-        response.pipe(file)
-        file.on('finish', () => {
-          file.close(resolve)
-        })
+
+    https.get(url, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        console.log(`🔀 Redirecting to ${response.headers.location}`)
+        download(response.headers.location, dest).then(resolve, reject)
+        return
+      }
+
+      if (response.statusCode !== 200) {
+        reject(new Error(`❌ Failed to download '${url}' (${response.statusCode})`))
+        return
+      }
+
+      response.pipe(file)
+      file.on('finish', () => {
+        file.close(resolve)
       })
-      .on('error', (err) => {
-        fs.unlink(dest, () => reject(err.message))
-      })
+    }).on('error', (err) => {
+      fs.unlink(dest, () => reject(err))
+    })
   })
 }
 
+/** Descomprime arquivos ZIP ou TAR.GZ */
 async function decompress(filePath, targetDir) {
-  console.log(`Decompressing ${filePath} to ${targetDir}`)
+  console.log(`📦 Decompressing ${filePath} → ${targetDir}`)
   if (filePath.endsWith('.zip')) {
-    await fs
-      .createReadStream(filePath)
-      .pipe(unzipper.Extract({ path: targetDir }))
-      .promise()
+    await fs.createReadStream(filePath).pipe(unzipper.Extract({ path: targetDir })).promise()
   } else if (filePath.endsWith('.tar.gz')) {
-    await tar.x({
-      file: filePath,
-      cwd: targetDir,
-    })
+    await tar.x({ file: filePath, cwd: targetDir })
   } else {
-    throw new Error(`Unsupported archive format: ${filePath}`)
+    throw new Error(`❌ Unsupported archive format: ${filePath}`)
   }
 }
 
+/** Detecta plataforma e arquitetura */
 function getPlatformArch() {
-  const platform = os.platform() // 'darwin', 'linux', 'win32'
-  const arch = os.arch() // 'x64', 'arm64', etc.
+  const platform = os.platform()
+  const arch = os.arch()
 
-  let bunPlatform, uvPlatform
-
-  if (platform === 'darwin') {
-    bunPlatform = arch === 'arm64' ? 'darwin-aarch64' : 'darwin-x86'
-    uvPlatform =
-      arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin'
-  } else if (platform === 'linux') {
-    bunPlatform = arch === 'arm64' ? 'linux-aarch64' : 'linux-x64'
-    uvPlatform = arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu'
-  } else if (platform === 'win32') {
-    bunPlatform = 'windows-x64' // Bun has limited Windows support
-    uvPlatform = 'x86_64-pc-windows-msvc'
-  } else {
-    throw new Error(`Unsupported platform: ${platform}`)
+  const platforms = {
+    darwin: {
+      bun: arch === 'arm64' ? 'darwin-aarch64' : 'darwin-x86',
+      uv: arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin'
+    },
+    linux: {
+      bun: arch === 'arm64' ? 'linux-aarch64' : 'linux-x64',
+      uv: arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu'
+    },
+    win32: {
+      bun: 'windows-x64',
+      uv: 'x86_64-pc-windows-msvc'
+    }
   }
 
-  return { bunPlatform, uvPlatform }
+  const current = platforms[platform]
+  if (!current) throw new Error(`❌ Unsupported platform: ${platform}`)
+
+  return { bunPlatform: current.bun, uvPlatform: current.uv }
 }
+
+/*Copia binário e cria aliases */
+function copyBinary({ source, destination, aliases = [], executable = true }) {
+  copySync(source, destination)
+  if (executable) {
+    try {
+      chmodSync(path.join(destination, path.basename(source)), 0o755)
+    } catch (err) {
+      console.warn('⚠️ Failed to set execute permissions:', err)
+    }
+  }
+  aliases.forEach(alias => {
+    try {
+      copyFileSync(path.join(destination, path.basename(source)), path.join(destination, alias))
+    } catch (err) {
+      console.warn('⚠️ Alias copy failed:', err)
+    }
+  })
+}
+
+// Script Principal
 
 async function main() {
-  console.log('Starting main function')
-  const platform = os.platform()
   const { bunPlatform, uvPlatform } = getPlatformArch()
-  console.log(`bunPlatform: ${bunPlatform}, uvPlatform: ${uvPlatform}`)
+  const platform = os.platform()
 
   const binDir = 'src-tauri/resources/bin'
-  const tempBinDir = 'scripts/dist'
-  const bunPath = `${tempBinDir}/bun-${bunPlatform}.zip`
-  let uvPath = `${tempBinDir}/uv-${uvPlatform}.tar.gz`
-  if (platform === 'win32') {
-    uvPath = `${tempBinDir}/uv-${uvPlatform}.zip`
-  }
-  try {
-    mkdirSync('scripts/dist')
-  } catch (err) {
-    // Expect EEXIST error if the directory already exists
-  }
+  const tempDir = 'scripts/dist'
 
-  // Adjust these URLs based on latest releases
-  const bunVersion = '1.2.10' // Example Bun version
-  const bunUrl = `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-${bunPlatform}.zip`
+  const bunVersion = '1.2.10'
+  const uvVersion = '0.6.17'
 
-  const uvVersion = '0.6.17' // Example UV version
-  let uvUrl = `https://github.com/astral-sh/uv/releases/download/${uvVersion}/uv-${uvPlatform}.tar.gz`
-  if (platform === 'win32') {
-    uvUrl = `https://github.com/astral-sh/uv/releases/download/${uvVersion}/uv-${uvPlatform}.zip`
-  }
+  const bunExt = 'zip'
+  const uvExt = platform === 'win32' ? 'zip' : 'tar.gz'
 
-  console.log(`Downloading Bun for ${bunPlatform}...`)
-  const bunSaveDir = path.join(tempBinDir, `bun-${bunPlatform}.zip`)
-  if (!fs.existsSync(bunSaveDir)) {
-    await download(bunUrl, bunSaveDir)
-    await decompress(bunPath, tempBinDir)
-  }
-  try {
-    copySync(
-      path.join(tempBinDir, `bun-${bunPlatform}`, 'bun'),
-      path.join(binDir)
-    )
-    fs.chmod(path.join(binDir, 'bun'), 0o755, (err) => {
-      if (err) {
-        console.log('Add execution permission failed!', err)
-      }
-    });
-    if (platform === 'darwin') {
-      copyFile(path.join(binDir, 'bun'), path.join(binDir, 'bun-x86_64-apple-darwin'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-      copyFile(path.join(binDir, 'bun'), path.join(binDir, 'bun-aarch64-apple-darwin'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-    } else if (platform === 'linux') {
-      copyFile(path.join(binDir, 'bun'), path.join(binDir, 'bun-x86_64-unknown-linux-gnu'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-    }
-  } catch (err) {
-    // Expect EEXIST error
-  }
-  try {
-    copySync(
-      path.join(tempBinDir, `bun-${bunPlatform}`, 'bun.exe'),
-      path.join(binDir)
-    )
-    if (platform === 'win32') {
-      copyFile(path.join(binDir, 'bun.exe'), path.join(binDir, 'bun-x86_64-pc-windows-msvc.exe'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-    }
-  } catch (err) {
-    // Expect EEXIST error
-  }
-  console.log('Bun downloaded.')
+  const bunFile = `bun-${bunPlatform}.${bunExt}`
+  const uvFile = `uv-${uvPlatform}.${uvExt}`
 
-  console.log(`Downloading UV for ${uvPlatform}...`)
-  const uvExt = platform === 'win32' ? `zip` : `tar.gz`
-  const uvSaveDir = path.join(tempBinDir, `uv-${uvPlatform}.${uvExt}`)
-  if (!fs.existsSync(uvSaveDir)) {
-    await download(uvUrl, uvSaveDir)
-    await decompress(uvPath, tempBinDir)
-  }
-  try {
-    copySync(
-      path.join(tempBinDir, `uv-${uvPlatform}`, 'uv'),
-      path.join(binDir)
-    )
-    fs.chmod(path.join(binDir, 'uv'), 0o755, (err) => {
-      if (err) {
-        console.log('Add execution permission failed!', err)
-      }
-    });
-    if (platform === 'darwin') {
-      copyFile(path.join(binDir, 'uv'), path.join(binDir, 'uv-x86_64-apple-darwin'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-      copyFile(path.join(binDir, 'uv'), path.join(binDir, 'uv-aarch64-apple-darwin'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-    } else if (platform === 'linux') {
-      copyFile(path.join(binDir, 'uv'), path.join(binDir, 'uv-x86_64-unknown-linux-gnu'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-    }
-  } catch (err) {
-    // Expect EEXIST error
-  }
-  try {
-    copySync(
-      path.join(tempBinDir, 'uv.exe'),
-      path.join(binDir)
-    )
-    if (platform === 'win32') {
-      copyFile(path.join(binDir, 'uv.exe'), path.join(binDir, 'uv-x86_64-pc-windows-msvc.exe'), (err) => {
-        if (err) {
-          console.log("Error Found:", err);
-        }
-      })
-    }
-  } catch (err) {
-    // Expect EEXIST error
-  }
-  console.log('UV downloaded.')
+  const bunUrl = `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/${bunFile}`
+  const uvUrl = `https://github.com/astral-sh/uv/releases/download/${uvVersion}/${uvFile}`
 
-  console.log('Downloads completed.')
+  const bunFilePath = path.join(tempDir, bunFile)
+  const uvFilePath = path.join(tempDir, uvFile)
+
+  mkdirSafe(tempDir)
+  mkdirSafe(binDir)
+
+  // Download e extração Bun
+  if (!existsSync(bunFilePath)) {
+    await download(bunUrl, bunFilePath)
+    await decompress(bunFilePath, tempDir)
+  }
+  handleBun(binDir, tempDir, bunPlatform, platform)
+
+  // Download e extração UV
+  if (!existsSync(uvFilePath)) {
+    await download(uvUrl, uvFilePath)
+    await decompress(uvFilePath, tempDir)
+  }
+  handleUv(binDir, tempDir, uvPlatform, platform)
+
+  console.log('✅ Downloads completed successfully.')
 }
 
-// Ensure the downloads directory exists
-if (!fs.existsSync('downloads')) {
-  fs.mkdirSync('downloads')
+//Handlers de binários
+
+function handleBun(binDir, tempDir, bunPlatform, platform) {
+  const baseDir = path.join(tempDir, `bun-${bunPlatform}`)
+  const sourceUnix = path.join(baseDir, 'bun')
+  const sourceWin = path.join(baseDir, 'bun.exe')
+
+  if (platform === 'win32') {
+    copyBinary({
+      source: sourceWin,
+      destination: binDir,
+      aliases: ['bun-x86_64-pc-windows-msvc.exe']
+    })
+  } else {
+    copyBinary({
+      source: sourceUnix,
+      destination: binDir,
+      aliases: [
+        ...(platform === 'darwin'
+          ? ['bun-x86_64-apple-darwin', 'bun-aarch64-apple-darwin']
+          : ['bun-x86_64-unknown-linux-gnu'])
+      ]
+    })
+  }
+
+  console.log('✔️ Bun ready.')
 }
 
-main().catch((err) => {
-  console.error('Error:', err)
+function handleUv(binDir, tempDir, uvPlatform, platform) {
+  const baseDir = path.join(tempDir, `uv-${uvPlatform}`)
+  const sourceUnix = path.join(baseDir, 'uv')
+  const sourceWin = path.join(baseDir, 'uv.exe')
+
+  if (platform === 'win32') {
+    copyBinary({
+      source: sourceWin,
+      destination: binDir,
+      aliases: ['uv-x86_64-pc-windows-msvc.exe']
+    })
+  } else {
+    copyBinary({
+      source: sourceUnix,
+      destination: binDir,
+      aliases: [
+        ...(platform === 'darwin'
+          ? ['uv-x86_64-apple-darwin', 'uv-aarch64-apple-darwin']
+          : ['uv-x86_64-unknown-linux-gnu'])
+      ]
+    })
+  }
+
+  console.log('✔️ UV ready.')
+}
+
+// Função para mkdir segura
+
+function mkdirSafe(dir) {
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+}
+
+// Executar
+
+main().catch(err => {
+  console.error('❌ Error:', err)
   process.exit(1)
 })
